@@ -7,19 +7,21 @@ import os
 
 from qgis.core import (
     Qgis,
-    QgsProcessingParameterBoolean,
-    QgsProcessingOutputNumber,
-    QgsProcessingOutputString,
     QgsExpressionContextUtils,
     QgsProcessingException,
+    QgsProcessingOutputString,
+    QgsProcessingOutputNumber,
+    QgsProcessingParameterBoolean,
+    QgsProcessingParameterString,
+    QgsProviderRegistry,
     QgsProcessingParameterCrs,
 )
+
 if Qgis.QGIS_VERSION_INT >= 31000:
-    from qgis.core import QgsProviderRegistry, QgsProviderConnectionException
+    from qgis.core import QgsProviderConnectionException
+
 if Qgis.QGIS_VERSION_INT >= 31400:
     from qgis.core import QgsProcessingParameterProviderConnection
-else:
-    from qgis.core import QgsProcessingParameterString
 
 from ...qgis_plugin_tools.tools.algorithm_processing import BaseProcessingAlgorithm
 from ...qgis_plugin_tools.tools.database import (
@@ -27,7 +29,10 @@ from ...qgis_plugin_tools.tools.database import (
     fetch_data_from_sql_query,
 )
 from ...qgis_plugin_tools.tools.i18n import tr
-from ...qgis_plugin_tools.tools.resources import plugin_test_data_path, plugin_path
+from ...qgis_plugin_tools.tools.resources import (
+    plugin_path,
+    plugin_test_data_path,
+)
 from ...qgis_plugin_tools.tools.version import version
 
 SCHEMA = "adresse"
@@ -65,27 +70,37 @@ class CreateDatabaseStructure(BaseProcessingAlgorithm):
 
     def initAlgorithm(self, config):
         connection_name = QgsExpressionContextUtils.globalScope().variable(
-            "adresse_connection_name"
+            "veloroutes_connection_name"
         )
         label = tr("Connexion PostgreSQL vers la base de données")
+        tooltip = 'Nom de la connexion dans QGIS pour se connecter à la base de données'
         if Qgis.QGIS_VERSION_INT >= 31400:
-            self.addParameter(QgsProcessingParameterProviderConnection(
+            param = QgsProcessingParameterProviderConnection(
                 self.CONNECTION_NAME,
                 label,
-                "postgres"
-            ))
+                "postgres",
+                defaultValue=connection_name,
+                optional=False,
+            )
         else:
-            db_param_a = QgsProcessingParameterString(
+            param = QgsProcessingParameterString(
                 self.CONNECTION_NAME,
                 label,
                 defaultValue=connection_name,
+                optional=False,
             )
-            db_param_a.setMetadata({
-                'widget_wrapper': {
-                    'class': 'processing.gui.wrappers_postgis.ConnectionWidgetWrapper'
+            param.setMetadata(
+                {
+                    "widget_wrapper": {
+                        "class": "processing.gui.wrappers_postgis.ConnectionWidgetWrapper"
+                    }
                 }
-            })
-            self.addParameter(db_param_a)
+            )
+        if Qgis.QGIS_VERSION_INT >= 31600:
+            param.setHelp(tooltip)
+        else:
+            param.tooltip_3liz = tooltip
+        self.addParameter(param)
 
         self.addParameter(
             QgsProcessingParameterBoolean(
@@ -156,9 +171,14 @@ class CreateDatabaseStructure(BaseProcessingAlgorithm):
     def checkSchema(self, parameters, context):
         # TODO Remove for QGIS < 3.10
         _ = context
-        connection_name = self.parameterAsString(
-            parameters, self.CONNECTION_NAME, context
-        )
+        if Qgis.QGIS_VERSION_INT >= 31400:
+            connection_name = self.parameterAsConnectionName(
+                parameters, self.CONNECTION_NAME, context)
+        else:
+            connection_name = self.parameterAsString(
+                parameters, self.CONNECTION_NAME, context
+            )
+
         sql = """
             SELECT schema_name
             FROM information_schema.schemata
@@ -199,8 +219,6 @@ class CreateDatabaseStructure(BaseProcessingAlgorithm):
         # Drop schema if needed
         override = self.parameterAsBool(parameters, self.OVERRIDE, context)
         if override:
-            feedback.pushInfo(tr("Essai de suppression du schéma {}…").format(SCHEMA))
-
             if Qgis.QGIS_VERSION_INT > 31000:
                 connection = metadata.findConnection(connection_name)
                 if SCHEMA in connection.schemas():
@@ -226,7 +244,6 @@ class CreateDatabaseStructure(BaseProcessingAlgorithm):
             "{}/50_TRIGGER.sql".format(SCHEMA),
             "{}/60_CONSTRAINT.sql".format(SCHEMA),
             "{}/70_COMMENT.sql".format(SCHEMA),
-            # "{}/90_GLOSSARY.sql".format(SCHEMA),
             "99_finalize_database.sql",
         ]
 
@@ -266,24 +283,27 @@ class CreateDatabaseStructure(BaseProcessingAlgorithm):
             sql_file = os.path.join(plugin_dir, "install/sql/{}".format(sf))
             with open(sql_file, "r") as f:
                 sql = f.read()
+
                 if len(sql.strip()) == 0:
                     feedback.pushInfo("  Skipped (empty file)")
                     continue
                 sql = sql.replace('2154', srid)
 
-                if Qgis.QGIS_VERSION_INT >= 31000:
-                    try:
-                        connection = metadata.findConnection(connection_name)
-                        connection.executeSql(sql)
-                    except QgsProviderConnectionException as e:
-                        raise QgsProcessingException(str(e))
-                else:
-                    _, _, _, ok, error_message = fetch_data_from_sql_query(
-                        connection_name, sql
-                    )
-                    if not ok:
-                        raise QgsProcessingException(error_message)
-                feedback.pushInfo("  Success !")
+                sql = sql.replace('2154', srid)
+
+            if Qgis.QGIS_VERSION_INT >= 31000:
+                try:
+                    connection = metadata.findConnection(connection_name)
+                    connection.executeSql(sql)
+                except QgsProviderConnectionException as e:
+                    raise QgsProcessingException(str(e))
+            else:
+                _, _, _, ok, error_message = fetch_data_from_sql_query(
+                    connection_name, sql
+                )
+                if not ok:
+                    raise QgsProcessingException(error_message)
+            feedback.pushInfo("  Success !")
 
         # Add version
         if run_migration or not dev_version:
@@ -313,10 +333,13 @@ class CreateDatabaseStructure(BaseProcessingAlgorithm):
                 raise QgsProcessingException(str(e))
         else:
             _, _, _, ok, error_message = fetch_data_from_sql_query(connection_name, sql)
-            if ok:
+            if not ok:
                 raise QgsProcessingException(error_message)
 
         feedback.pushInfo("Version de la base de données '{}'.".format(metadata_version))
+
+        if run_migration:
+            feedback.reportError("You need to run migrations, old version installed !")
 
         return {
             self.OUTPUT_STATUS: 1,

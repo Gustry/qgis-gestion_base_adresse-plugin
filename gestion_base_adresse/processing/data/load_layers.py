@@ -156,7 +156,7 @@ class LoadLayersAlgorithm(BaseProcessingAlgorithm):
             connection = metadata.findConnection(connection_name)
             uri = QgsDataSourceUri(connection.uri())
         else:
-            uri = uri_from_name(connection)
+            uri = uri_from_name(connection_name)
 
         is_host = uri.host() != ""
         if is_host:
